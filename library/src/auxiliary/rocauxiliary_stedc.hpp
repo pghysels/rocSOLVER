@@ -43,6 +43,9 @@
 
 ROCSOLVER_BEGIN_NAMESPACE
 
+#define USE_PIETERS_SECULAR_SOLVER
+// #define USE_PIETERS_FASTER_LESS_ACCURATE_SECULAR_SOLVER
+
 #define STEDC_BDIM 512 // Number of threads per thread-block used in main stedc kernels
 #define MAXITERS 50 // Max number of iterations for root finding method
 
@@ -637,6 +640,194 @@ __device__ rocblas_int seq_solve_ext(const rocblas_int dd,
     *ev = x;
     return converged ? 0 : 1;
 }
+
+/*
+ * Returns dlam, the distance from the nearest pole, if dlam > 0 the nearest pole is D[k], else it is D[k+1].
+ * If k == dd-1, dlam > 0,
+ */
+template <typename S>
+__device__ rocblas_int secular_solver(rocblas_int dd,
+                                      const S* D,
+                                      const S* z,
+                                      const S p,
+                                      rocblas_int k,
+                                      S& dlam,
+                                      const S tol)
+{
+    S pinv = S(1.) / p;
+    auto secular_eq = [&](S x0, S x, S& fx, S& dfx, S& ddfx, S& absfx) {
+#if 0
+        // order based on distance from poles
+        fx = dfx = ddfx = 0.;
+        for(int ii = 0; ii < k + 1; ++ii) {
+            S tmp = (D[ii] - x0) - x;
+            S zi = z[ii];
+            S tmp1 = zi / tmp;
+            fx += zi * tmp1;
+            S tmp3 = tmp1 * tmp1;
+            dfx += tmp3;
+            ddfx += tmp3 / tmp;
+        }
+        S gx = 0., dgx = 0., ddgx = 0.;
+        for(int ii = dd - 1; ii > k; --ii) {
+            S tmp = (D[ii] - x0) - x;
+            S zi = z[ii];
+            S tmp1 = zi / tmp;
+            gx += zi * tmp1;
+            S tmp3 = tmp1 * tmp1;
+            dfx += tmp3;
+            ddgx += tmp3 / tmp;
+        }
+        absfx = -fx + gx + pinv;
+        fx += gx + pinv;
+        dfx += dgx;
+        ddfx += ddgx;
+        ddfx *= 2.;
+#else
+        fx = dfx = ddfx = absfx = 0.;
+        for(int ii = 0; ii < dd; ++ii) {
+            S tmp = (D[ii] - x0) - x;
+            S zi = z[ii];
+            S tmp1 = zi / tmp;
+            S tmp2 = zi * tmp1;
+            fx += tmp2;
+            absfx += abs(tmp2);
+            S tmp3 = tmp1 * tmp1;
+            dfx += tmp3;
+            ddfx += tmp3 / tmp;
+        }
+        fx += pinv;
+        absfx += pinv;
+        ddfx *= 2.;
+
+        // with Kahan summation for fx
+        // fx = dfx = ddfx = absfx = 0.;
+        // S fx_correction = 0.;
+        // for(int ii = 0; ii < dd; ++ii) {
+        //     S tmp = (D[ii] - x0) - x;
+        //     S zi = z[ii];
+        //     S tmp1 = zi / tmp;
+        //     S tmp2 = zi * tmp1;
+        //     S y = tmp2 - fx_correction;
+        //     S t = fx + y;
+        //     fx_correction = (t - fx) - y;
+        //     fx = t;
+        //     absfx += abs(tmp2);
+        //     S tmp3 = tmp1 * tmp1;
+        //     dfx += tmp3;
+        //     ddfx += tmp3 / tmp;
+        // }
+        // fx += pinv;
+        // absfx += pinv;
+        // ddfx *= 2.;
+#endif
+    };
+
+    S low = D[k], up;
+    if(k < dd - 1)
+        up = D[k + 1];
+    else {
+        up = 0.;
+        for(int ii = 0; ii < dd; ++ii)
+            up += z[ii] * z[ii];
+            up *= p;
+            up += D[k];
+    }
+    S dx = (low + up) / S(2.), x0;
+    S fx, dfx, ddfx, absfx;
+
+    secular_eq(0, dx, fx, dfx, ddfx, absfx);
+
+    // might be too loose for large dd, too strict for small dd ?
+    if(abs(fx) / absfx <= dd * tol){
+        // for(int ii = 0; ii < dd; ++ii)
+        //     D[ii] -= dx;
+        dlam = dx - low;
+        return 0;
+    }
+
+    S tau(0.), delta = up - low;
+    // if(k < dd-1)
+    // {
+    //     S z2 = z[k] * z[k], z12 = z[k + 1] * z[k + 1];
+    //     S gx = fx - z2 / (D[k] - dx) - z12 / (D[k+1] - dx);
+    //     S a, b;
+    //     if(fx > 0) {
+    //         b = z2 * delta;
+    //         a = gx * delta + (z2 + z12);
+    //     } else if (fx < 0) {
+    //         b = - z12 * delta;
+    //         a = - gx * delta + (z2 + z12);
+    //     }
+    //     tau = (a <= 0) ? (a - std::sqrt(a * a - S(4.) * b * gx)) / (S(2.) * gx) :
+    //         S(2.) * b / (a + std::sqrt(a * a - S(4.) * b * gx));
+    // } else {
+    //     S z2 = z[k - 1] * z[k - 1], z12 = z[k] * z[k];
+    //     S hx = z2 / (D[k-1] - up) + z12 / (D[k] - up);
+    //     S gx = fx - z2 / (D[k-1] - dx) - z12 / (D[k] - dx);
+    //     if(fx <= 0 && gx <= -hx)
+    //         tau = delta;
+    //     else {
+    //         S dd = (D[k] - D[k-1]);
+    //         S a = - gx * dd + (z2 + z12);
+    //         S b = - z12 * dd;
+    //         tau = (a >= 0) ? (a + std::sqrt(a * a - S(4.) * b * gx)) / (S(2.) * gx) :
+    //             S(2.) * b / (a - std::sqrt(a * a - S(4.) * b * gx));
+    //     }
+    // }
+    if(fx > 0) {
+        x0 = low;
+        up = delta / S(2.);
+        low = tau;
+    } else {
+        x0 = up;
+        low = -delta / S(2.);
+        up = tau;
+    }
+    dx = (low + up) / S(2.);
+    S x = dx;
+    // for(int ii = 0; ii < dd; ++ii)
+    //     D[ii] -= x0;
+
+    S xold = 0;
+    int jj = 0, maxit = 100;
+    for(; jj < maxit; ++jj)
+    {
+        secular_eq(x0, x, fx, dfx, ddfx, absfx);
+        // for(int ii = 0; ii < dd; ++ii)
+        //     D[ii] -= dx;
+
+        // might be too loose for large dd, too strict for small dd ?
+#if defined(USE_PIETERS_FASTER_LESS_ACCURATE_SECULAR_SOLVER)
+        if(abs(fx) / absfx <= dd * tol)
+            break;
+#endif
+
+        if(fx >= 0)
+            up = x;
+        else
+            low = x;
+#if defined(USE_PIETERS_FASTER_LESS_ACCURATE_SECULAR_SOLVER)
+        if(up - low <= tol)
+            break;
+#endif
+        dx = - fx * dfx / (dfx * dfx - S(.5) * fx * ddfx);
+        xold = x;
+        S xnew = x + dx;
+        if(xnew > low && xnew < up)
+            x = xnew;
+        else {
+            // S xold = x;
+            x = (low + up) / 2;
+            if(x == low || x == up)
+                break;
+            dx = x - xold;
+        }
+    }
+    dlam = (k == dd - 1) ? x + (x0 - D[k]) : x;
+    return jj == maxit ? 1 : 0;
+}
+
 
 //--------------------------------------------------------------------------------------//
 /** STEDC_NUM_LEVELS returns the ideal number of times/levels in which a matrix
@@ -1482,11 +1673,14 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
             // eigenvalues (D - lambda_i) are updated while computing each eigenvalue.
             // This will prevent collapses and division by zero when an eigenvalue
             // is too close to a pole.
+#if defined(USE_PIETERS_SECULAR_SOLVER)
+#else
             for(int i = iam; i < dd; i += bdm)
             {
                 for(int j = i + n; j < i + sz * n; j += n)
                     tmpd[j] = tmpd[i];
             }
+#endif
 
             // finally copy over all diagonal elements in ev. ev will be overwritten
             // by the new computed eigenvalues of the merged block
@@ -1499,7 +1693,7 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
             // corresponding to non-deflated new eigenvalues of the merged block
             /* ----------------------------------------------------------------- */
             // each thread will find a different zero in parallel
-            S a, b;
+            // S lam0_j0, dlam_j0;
             for(int j = iam; j < sz; j += bdm)
             {
                 if(mask[j] == 1)
@@ -1511,7 +1705,11 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
                     {
                         auto step = count / 2;
                         auto it = cc + step;
+#if defined(USE_PIETERS_SECULAR_SOLVER)
+                        if(tmpd[it] < valf)
+#else
                         if(tmpd[it + j * n] < valf)
+#endif
                         {
                             cc = ++it;
                             count -= step + 1;
@@ -1525,6 +1723,13 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
                     // deflated values are not changed.
                     rocblas_int linfo;
 
+#if defined(USE_PIETERS_SECULAR_SOLVER)
+                    mask[j] = -(cc + 1);
+                    S dlam;
+                    linfo = secular_solver(dd, tmpd, zz, abs(p), cc, dlam, eps);
+                    ev[j] = dlam;
+
+#else
 #if defined(ROCSOLVER_USE_REFERENCE_SECULAR_EQUATIONS_SOLVER)
                     linfo = slaed4(dd, cc, tmpd + j * n, zz, std::abs(p), ev[j]);
 #else
@@ -1535,12 +1740,32 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
                         linfo = seq_solve(dd, tmpd + j * n, zz, (p < 0 ? -p : p), cc, ev + j, eps,
                                           ssfmin, ssfmax);
 #endif
+                    if(p < 0)
+                        ev[j] *= -1;
 
+#endif
+                }
+            }
+            __syncthreads();
+#if defined(USE_PIETERS_SECULAR_SOLVER)
+            for(int j = sz - 1; j >= 0; --j) {
+                auto cc = mask[j];
+                if(!cc) continue;
+                cc = - cc - 1;
+                S dlam = ev[j];
+                S lam0 = (dlam > 0) ? tmpd[cc] : tmpd[cc + 1];
+                __syncthreads();
+                for(int i = iam; i < dd; i += bdm)
+                    tmpd[i + j * n] = (tmpd[i] - lam0) - dlam;
+                if(!iam){
+                    mask[j] = 1;
+                    ev[j] = lam0 + dlam;
                     if(p < 0)
                         ev[j] *= -1;
                 }
             }
             __syncthreads();
+#endif
 
             // Re-scale vector Z to avoid bad numerics when an eigenvalue
             // is too close to a pole
@@ -1562,6 +1787,7 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
         }
     }
 }
+
 
 //--------------------------------------------------------------------------------------//
 /** STEDC_MERGEVECTORS_KERNEL prepares vectors from the secular equation for
