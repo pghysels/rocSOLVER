@@ -412,6 +412,16 @@ if(BUILD_WITH_SPARSE)
   )
 endif()
 
+if(BUILD_WITH_HIPBLASLT)
+  target_link_libraries(rocsolver PRIVATE roc::hipblaslt)
+  list(APPEND static_depends PACKAGE hipblaslt)
+  set_source_files_properties(${rocsolver_auxiliary_source}
+    PROPERTIES
+      COMPILE_DEFINITIONS HAVE_HIPBLASLT
+  )
+endif()
+
+
 if(ROCSOLVER_EMBED_FMT)
   target_link_libraries(rocsolver PRIVATE $<BUILD_INTERFACE:fmt::fmt-header-only>)
 else()

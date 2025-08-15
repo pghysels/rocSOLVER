@@ -38,6 +38,9 @@ Options:
   --rocsparse-path <sparsedir> Specify path to an existing rocSPARSE install directory.
                                (e.g. /src/rocSPARSE/build/release/rocsparse-install)
 
+  --hipblaslt-path <hipbasltdir> Specify path to an existing hipBLASLt install directory.
+                               (e.g. /src/hipBLASLt/build/release/hipblaslt-install)
+
   --cleanup                    Pass this flag to remove intermediary build files after build and reduce disk usage
 
   -g | --debug                 Pass this flag to build in Debug mode (equivalent to set CMAKE_BUILD_TYPE=Debug).
@@ -67,6 +70,8 @@ Options:
   -n | --no-optimizations      Pass this flag to disable optimizations for small sizes.
 
   --[no-]sparse                Pass this flag to add [or remove] rocSPARSE as build-time dependency.
+
+  --[no-]hipblaslt             Pass this flag to add [or remove] hipBLASLt as build-time dependency.
 
   -a | --architecture          Set GPU architecture target, e.g. "gfx803;gfx900;gfx906;gfx908".
                                If you don't know the architecture of the GPU in your local machine, it can be
@@ -326,10 +331,12 @@ cleanup=false
 build_sanitizer=false
 build_codecoverage=false
 unset build_with_sparse
+unset build_with_hipblaslt
 unset architecture
 unset rocblas_path
 unset rocsolver_path
 unset rocsparse_path
+unset hipblaslt_path
 declare -a cmake_common_options
 declare -a cmake_client_options
 
@@ -340,7 +347,7 @@ declare -a cmake_client_options
 # check if we have a modern version of getopt that can handle whitespace and long parameters
 getopt -T
 if [[ $? -eq 4 ]]; then
-  GETOPT_PARSE=$(getopt --name "${0}" --longoptions help,install,package,clients,clients-only,dependencies,cleanup,debug,hip-clang,codecoverage,relwithdebinfo,build_dir:,build-path:,lib_dir:,lib-path:,install_dir:,install-path:,rocblas_dir:,rocblas-path:,rocsolver_dir:,rocsolver-path:,rocsparse_dir:,rocsparse-path:,architecture:,static,relocatable,no-optimizations,sparse,no-sparse,docs,address-sanitizer,cmake-arg: --options hipcdgsrnka: -- "$@")
+  GETOPT_PARSE=$(getopt --name "${0}" --longoptions help,install,package,clients,clients-only,dependencies,cleanup,debug,hip-clang,codecoverage,relwithdebinfo,build_dir:,build-path:,lib_dir:,lib-path:,install_dir:,install-path:,rocblas_dir:,rocblas-path:,rocsolver_dir:,rocsolver-path:,rocsparse_dir:,rocsparse-path:,hipblaslt_dir:,hipblaslt-path:,architecture:,static,relocatable,no-optimizations,sparse,no-sparse,hipblaslt,no-hipblaslt,docs,address-sanitizer,cmake-arg: --options hipcdgsrnka: -- "$@")
 else
   echo "Need a new version of getopt"
   exit 1
@@ -394,6 +401,12 @@ while true; do
     --no-sparse)
         build_with_sparse=false
         shift ;;
+    --hipblaslt)
+        build_with_hipblaslt=true
+        shift ;;
+    --no-hipblaslt)
+        build_with_hipblaslt=false
+        shift ;;
     --build_dir|--build-path)
         build_dir=${2}
         shift 2;;
@@ -411,6 +424,9 @@ while true; do
         shift 2 ;;
     --rocsparse_dir|--rocsparse-path)
         rocsparse_path=${2}
+        shift 2 ;;
+    --hipblaslt_dir|--hipblaslt-path)
+        hipblaslt_path=${2}
         shift 2 ;;
     --cleanup)
         cleanup=true
@@ -470,6 +486,9 @@ if [[ -n "${rocsolver_path+x}" ]]; then
 fi
 if [[ -n "${rocsparse_path+x}" ]]; then
   rocsparse_path="$(make_absolute_path "${rocsparse_path}")"
+fi
+if [[ -n "${hipblaslt_path+x}" ]]; then
+  hipblaslt_path="$(make_absolute_path "${hipblaslt_path}")"
 fi
 
 # Default cmake executable is called cmake
@@ -565,6 +584,11 @@ if [[ -n "${rocsparse_path+x}" ]]; then
   cmake_common_options+=("-Drocsparse_DIR=${rocsparse_path}/lib/cmake/rocsparse")
 fi
 
+if [[ -n "${hipblaslt_path+x}" ]]; then
+  cmake_common_options+=("-Dhipblaslt_DIR=${hipblaslt_path}/lib/cmake/hipblaslt")
+fi
+
+
 if [[ "${static_lib}" == true ]]; then
   cmake_common_options+=('-DBUILD_SHARED_LIBS=OFF')
 fi
@@ -578,6 +602,14 @@ if [[ -n "${build_with_sparse+x}" ]]; then
     cmake_common_options+=('-DBUILD_WITH_SPARSE=ON')
   else
     cmake_common_options+=('-DBUILD_WITH_SPARSE=OFF')
+  fi
+fi
+
+if [[ -n "${build_with_hipblaslt+x}" ]]; then
+  if [[ "${build_with_hipblaslt}" == true ]]; then
+    cmake_common_options+=('-DBUILD_WITH_HIPBLASLT=ON')
+  else
+    cmake_common_options+=('-DBUILD_WITH_HIPBLASLT=OFF')
   fi
 fi
 

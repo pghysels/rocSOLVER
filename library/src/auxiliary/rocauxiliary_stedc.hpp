@@ -38,6 +38,8 @@
 #include "rocblas.hpp"
 #include "rocsolver/rocsolver.h"
 
+#include <hipblaslt/hipblaslt-ext.hpp>
+
 #include <algorithm>
 
 ROCSOLVER_BEGIN_NAMESPACE
@@ -49,6 +51,16 @@ ROCSOLVER_BEGIN_NAMESPACE
 // external gemm-based updates.
 #define STEDC_EXTERNAL_GEMM true
 
+// TODO put somewhere else?
+#ifndef CHECK_HIPBLASLT_ERROR
+#define CHECK_HIPBLASLT_ERROR(error)                                                      \
+    if(error != HIPBLAS_STATUS_SUCCESS)                                                   \
+    {                                                                                     \
+        fprintf(stderr, "hipBLASLt error(Err=%d) at %s:%d\n", error, __FILE__, __LINE__); \
+        fprintf(stderr, "\n");                                                            \
+        exit(EXIT_FAILURE);                                                               \
+    }
+#endif
 
 /*************** Main kernels *********************************************************/
 /**************************************************************************************/
@@ -60,15 +72,16 @@ ROCSOLVER_BEGIN_NAMESPACE
         the batch_count problems. Each thread will work with a matrix in the batch. 
         - Size of groups is set to STEDC_BDIM. **/
 template <typename S>
-ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM) stedc_divide_kernel(const rocblas_int levs,
-                                                                        const rocblas_int blks,
-                                                                        const rocblas_int n,
-                                                                        S* DD,
-                                                                        const rocblas_stride strideD,
-                                                                        S* EE,
-                                                                        const rocblas_stride strideE,
-                                                                        const rocblas_int batch_count,
-                                                                        rocblas_int* splitsA)
+ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
+    stedc_divide_kernel(const rocblas_int levs,
+                        const rocblas_int blks,
+                        const rocblas_int n,
+                        S* DD,
+                        const rocblas_stride strideD,
+                        S* EE,
+                        const rocblas_stride strideE,
+                        const rocblas_int batch_count,
+                        rocblas_int* splitsA)
 {
     // threads and groups indices
     rocblas_int bid = hipBlockIdx_x * hipBlockDim_x + hipThreadIdx_x;
@@ -116,7 +129,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM) stedc_divide_kernel(const ro
         }
     }
 }
-
 
 //--------------------------------------------------------------------------------------//
 /** STEDC_SOLVE_KERNEL implements the solver phase of the DC algorithm to
@@ -171,14 +183,13 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM) stedc_solve_kernel(const roc
     // Solve the blks sub-blocks in parallel (using classic QR iteration).
     if(sid < blks)
     {
-        rocblas_int sbs = ns[sid];  // size of sub-block
-        rocblas_int p2 = ps[sid];   // start position of sub-block
+        rocblas_int sbs = ns[sid]; // size of sub-block
+        rocblas_int p2 = ps[sid]; // start position of sub-block
 
         run_steqr(tidb, tidb_inc, sbs, D + p2, E + p2, C + p2 + p2 * ldc, ldc, info, W + p2 * 2,
                   30 * sbs, eps, ssfmin, ssfmax, false);
     }
 }
-
 
 //--------------------------------------------------------------------------------------//
 /** STEDC_MERGEPREPARE_KERNEL performs deflation and prepares the secular equation for
@@ -281,7 +292,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
         for(int j = tx; j < sz; j += dim)
             z[p2 + j] = ptz[(p2 + j) * ldc] / sqrt(2);
 
-
         // 2. calculate deflation tolerance
         // ----------------------------------------------------------------
         // compute maximum of diagonal and z in each merge block
@@ -320,7 +330,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
         maxz = inrmsz[0];
         maxd = maxz > maxd ? maxz : maxd;
         S tol = 8 * eps * maxd;
-
 
         // 3. deflate eigenvalues
         // ----------------------------------------------------------------
@@ -407,9 +416,8 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
             }
         }
 
-
         // 4. Organize data with non-deflated values to prepare secular equation
-        // ------------------------------------------------------------------------ 
+        // ------------------------------------------------------------------------
         // define shifted arrays
         S* tmpd = temps + in * n;
         S* diag = D + in;
@@ -439,7 +447,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
         }
     }
 }
-
 
 //--------------------------------------------------------------------------------------//
 /** STEDC_MERGEVALUES_KERNEL solves the secular equation for every pair of sub-blocks 
@@ -535,9 +542,8 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
             sz += ns[in + i];
         in = ps[in];
 
-
         // 1. Organize data with non-deflated values to prepare secular equation
-        // ----------------------------------------------------------------- 
+        // -----------------------------------------------------------------
         // All threads of the group participating in the merge will work together
         // to solve the correspondinbg secular eqn. Now 'iam' indexes those threads
         iam = tidb;
@@ -592,10 +598,9 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
             ev[i] = diag[i];
         __syncthreads();
 
-
         // 2. Solve secular eqns, i.e. find the dd zeros
         // corresponding to non-deflated new eigenvalues of the merged block
-        // ----------------------------------------------------------------- 
+        // -----------------------------------------------------------------
         // each thread will find a different zero in parallel
         S a, b;
         for(int j = iam; j < sz; j += bdm)
@@ -657,7 +662,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
         }
     }
 }
-
 
 //--------------------------------------------------------------------------------------//
 /** STEDC_MERGEVECTORS_KERNEL prepares vectors from the secular equation for
@@ -772,7 +776,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
         }
         __syncthreads();
 
-
         // Prepare vectors corresponding to non-deflated values
         S temp, nrm;
         rocblas_int j = vidb;
@@ -873,7 +876,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
     }
 }
 
-
 //--------------------------------------------------------------------------------------//
 /** STEDC_MERGEUPDATE_KERNEL updates vectors and values after a merge is done. 
         - Call this kernel with batch_count groups in y, and as many groups as columns would 
@@ -970,7 +972,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(STEDC_BDIM)
     }
 }
 
-
 /** STEDC_SORT sorts computed eigenvalues and eigenvectors in increasing order **/
 template <typename T, typename S, typename U>
 ROCSOLVER_KERNEL void __launch_bounds__(BS1) stedc_sort(const rocblas_int n,
@@ -1024,7 +1025,6 @@ ROCSOLVER_KERNEL void __launch_bounds__(BS1) stedc_sort(const rocblas_int n,
         __syncthreads();
     }
 }
-
 
 /******************* Host functions *********************************************/
 /*******************************************************************************/
@@ -1241,7 +1241,7 @@ rocblas_status rocsolver_stedc_template(rocblas_handle handle,
         ssfmin = sqrt(ssfmin) / (eps * eps);
         ssfmax = sqrt(ssfmax) / S(3.0);
 
-        // find number of sub-blocks 
+        // find number of sub-blocks
         rocblas_int levs = stedc_num_levels(n);
         rocblas_int blks = 1 << levs;
 
@@ -1264,17 +1264,15 @@ rocblas_status rocsolver_stedc_template(rocblas_handle handle,
         // 1. divide phase
         //-----------------------------
         rocblas_int groups = (batch_count - 1) / STEDC_BDIM + 1;
-        ROCSOLVER_LAUNCH_KERNEL((stedc_divide_kernel<S>),
-                                dim3(groups), dim3(STEDC_BDIM), 0, stream, levs, blks, n, D + shiftD,
-                                strideD, E + shiftE, strideE, batch_count, splits);
+        ROCSOLVER_LAUNCH_KERNEL((stedc_divide_kernel<S>), dim3(groups), dim3(STEDC_BDIM), 0, stream,
+                                levs, blks, n, D + shiftD, strideD, E + shiftE, strideE,
+                                batch_count, splits);
 
         // 2. solve phase
         //-----------------------------
-        ROCSOLVER_LAUNCH_KERNEL((stedc_solve_kernel<S>),
-                                dim3(blks, batch_count), dim3(64), 0, stream, levs, blks, 
-                                n, D + shiftD, strideD, E + shiftE, strideE, 
-                                V, 0, ldv, strideV, info, (S*)work_stack, splits, 
-                                eps, ssfmin, ssfmax);
+        ROCSOLVER_LAUNCH_KERNEL((stedc_solve_kernel<S>), dim3(blks, batch_count), dim3(64), 0,
+                                stream, levs, blks, n, D + shiftD, strideD, E + shiftE, strideE, V,
+                                0, ldv, strideV, info, (S*)work_stack, splits, eps, ssfmin, ssfmax);
 
         // 3. merge phase
         //----------------
@@ -1287,24 +1285,22 @@ rocblas_status rocsolver_stedc_template(rocblas_handle handle,
         {
             // a. prepare secular equations
             rocblas_int numgrps2 = 1 << (levs - 1 - k);
-            ROCSOLVER_LAUNCH_KERNEL((stedc_mergePrepare_kernel<S>),
-                                    dim3(numgrps2, batch_count), dim3(STEDC_BDIM), lmemsize1, stream, 
-                                    levs, blks, k, n, D + shiftD, strideD,
-                                    E + shiftE, strideE, V, 0, ldv, strideV, tmpz, tempgemm, splits,
-                                    eps);
+            ROCSOLVER_LAUNCH_KERNEL((stedc_mergePrepare_kernel<S>), dim3(numgrps2, batch_count),
+                                    dim3(STEDC_BDIM), lmemsize1, stream, levs, blks, k, n,
+                                    D + shiftD, strideD, E + shiftE, strideE, V, 0, ldv, strideV,
+                                    tmpz, tempgemm, splits, eps);
 
             // b. solve secular eq to find merged eigenvalues
-            ROCSOLVER_LAUNCH_KERNEL((stedc_mergeValues_kernel<S>),
-                                    dim3(numgrps2, batch_count), dim3(STEDC_BDIM), 0, stream, 
-                                    levs, blks, k, n, D + shiftD, strideD,
-                                    E + shiftE, strideE, tmpz, tempgemm, splits, eps, ssfmin, ssfmax);
+            ROCSOLVER_LAUNCH_KERNEL((stedc_mergeValues_kernel<S>), dim3(numgrps2, batch_count),
+                                    dim3(STEDC_BDIM), 0, stream, levs, blks, k, n, D + shiftD,
+                                    strideD, E + shiftE, strideE, tmpz, tempgemm, splits, eps,
+                                    ssfmin, ssfmax);
 
             // c. find merged eigenvectors
-            ROCSOLVER_LAUNCH_KERNEL(
-                (stedc_mergeVectors_kernel<STEDC_EXTERNAL_GEMM, S>),
-                dim3(numgrps3, batch_count), dim3(STEDC_BDIM), lmemsize3, stream, 
-                levs, blks, k, n, D + shiftD, strideD, E + shiftE, strideE, V, 0, ldv, strideV, 
-                tmpz, tempgemm, splits);
+            ROCSOLVER_LAUNCH_KERNEL((stedc_mergeVectors_kernel<STEDC_EXTERNAL_GEMM, S>),
+                                    dim3(numgrps3, batch_count), dim3(STEDC_BDIM), lmemsize3,
+                                    stream, levs, blks, k, n, D + shiftD, strideD, E + shiftE,
+                                    strideE, V, 0, ldv, strideV, tmpz, tempgemm, splits);
 
             if(STEDC_EXTERNAL_GEMM)
             {
@@ -1313,16 +1309,181 @@ rocblas_status rocsolver_stedc_template(rocblas_handle handle,
                 // TODO: using macro STEDC_EXTERNAL_GEMM = true for now. In the future we can pass
                 // STEDC_EXTERNAL_GEMM at run time to switch between internal vector updates and
                 // external gemm based updates.
+#if 0
                 rocsolver_gemm(handle, rocblas_operation_none, rocblas_operation_none, n, n, n,
                                &one, V, 0, ldv, strideV, tempgemm, n * n, n, 2 * n * n, &zero,
                                tempgemm, 0, n, 2 * n * n, batch_count, workArr);
+#else
+
+                bool use_hipblaslt = false;
+#if defined(HAVE_HIPBLASLT)
+                use_hipblaslt = std::is_same<S, float>::value || std::is_same<S, double>::value;
+
+                if(use_hipblaslt)
+                {
+                    std::cout << "Trying to use hipBLASLt" << std::endl;
+                    rocblas_int lvl = levs - k;
+                    rocblas_int nb = 1 << lvl;
+                    std::vector<rocblas_int> ns(nb);
+                    ns[0] = n;
+                    for(int i = 0; i < lvl; ++i)
+                    {
+                        for(int j = (1 << i); j > 0; --j)
+                        {
+                            auto t = ns[j - 1];
+                            auto t2 = t / 2;
+                            ns[j * 2 - 1] = (2 * t2 < t) ? t2 + 1 : t2;
+                            ns[j * 2 - 2] = t2;
+                        }
+                    }
+
+                    // TODO move some initialization/allocation outside of k loop?
+
+                    hipDataType dtype; // = hipblaslt_type2datatype<S>();
+                    hipblasComputeType_t ctype;
+                    if(std::is_same<S, float>::value)
+                    {
+                        dtype = HIP_R_32F;
+                        ctype = HIPBLAS_COMPUTE_32F;
+                    }
+                    if(std::is_same<S, double>::value)
+                    {
+                        dtype = HIP_R_64F;
+                        ctype = HIPBLAS_COMPUTE_64F;
+                    }
+
+                    hipblasLtHandle_t handle;
+                    CHECK_HIPBLASLT_ERROR(hipblasLtCreate(&handle));
+                    hipblaslt_ext::GemmPreference gemmPref;
+
+                    // TODO what should be the max, just query as below??
+                    uint64_t max_workspace_size = n * n * batch_count * sizeof(S);
+                    gemmPref.setMaxWorkspaceBytes(max_workspace_size);
+
+                    hipblaslt_ext::GroupedGemm groupedgemm(handle, HIPBLAS_OP_N, HIPBLAS_OP_N,
+                                                           dtype, dtype, dtype, dtype, ctype);
+#if HIPBLASLT_VERSION_MAJOR < 7
+                    std::vector<hipblaslt_ext::GemmEpilogueV2> epilogue{
+                        hipblaslt_ext::GemmEpilogueV2()};
+                    std::vector<hipblaslt_ext::GemmInputsV2> inputs(nb);
+                    hipblaslt_ext::GemmProblemTypeV2 problemtype(HIPBLAS_OP_N, HIPBLAS_OP_N, dtype,
+                                                                 dtype, dtype, dtype, ctype);
+#else
+                    std::vector<hipblaslt_ext::GemmEpilogue> epilogue{hipblaslt_ext::GemmEpilogue()};
+                    std::vector<hipblaslt_ext::GemmInputs> inputs(nb);
+                    hipblaslt_ext::GemmProblemType problemtype(HIPBLAS_OP_N, HIPBLAS_OP_N, dtype,
+                                                               dtype, dtype, dtype, ctype);
+#endif
+                    std::vector<int64_t> M(nb), N(nb, n), B(nb, batch_count), lda(nb, ldv),
+                        strideA(nb, strideV), strideB(2 * n * n);
+                    for(rocblas_int i = 0, ps = 0; i < nb; ++i)
+                    {
+                        M[i] = ns[i];
+                        inputs[i].setA(V + ps * ldv + ps);
+                        auto dCptr = tempgemm + ps;
+                        inputs[i].setB(dCptr + n * n);
+                        inputs[i].setC(dCptr);
+                        inputs[i].setD(dCptr);
+                        inputs[i].setAlpha(&one);
+                        inputs[i].setBeta(&zero);
+                        ps += ns[i];
+                    }
+                    groupedgemm.setProblem(M, N, M, B, lda, N, N, N, strideA, strideB, strideB,
+                                           strideB, epilogue, inputs, problemtype);
+
+                    const int request_solutions = 1;
+                    std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult;
+                    // CHECK_HIPBLASLT_ERROR(groupedgemm.algoGetHeuristic(request_solutions, gemmPref, heuristicResult));
+                    auto err
+                        = groupedgemm.algoGetHeuristic(request_solutions, gemmPref, heuristicResult);
+                    if(err != HIPBLAS_STATUS_SUCCESS)
+                    {
+                        switch(err)
+                        {
+                        case HIPBLAS_STATUS_SUCCESS:
+                            std::cout << "algoGetHeuristic returned HIPBLAS_STATUS_SUCCESS"
+                                      << std::endl;
+                            break;
+                        case HIPBLAS_STATUS_NOT_SUPPORTED:
+                            std::cout << "algoGetHeuristic returned HIPBLAS_STATUS_NOT_SUPPORTED"
+                                      << std::endl;
+                            break;
+                        case HIPBLAS_STATUS_INVALID_VALUE:
+                            std::cout << "algoGetHeuristic returned HIPBLAS_STATUS_INVALID_VALUE"
+                                      << std::endl;
+                            break;
+                        default:
+                            std::cout << "algoGetHeuristic returned some other error" << std::endl;
+                        }
+                    }
+
+                    if(heuristicResult.empty())
+                    {
+                        std::cerr
+                            << "No valid hipBLASLt solution found! Please try get_all_algos instead"
+                            << std::endl;
+                        use_hipblaslt = false;
+                    }
+                    else
+                    {
+                        uint64_t workspace_size = max_workspace_size;
+                        for(auto& h : heuristicResult)
+                            workspace_size = std::max(workspace_size, h.workspaceSize);
+                        void* d_workspace;
+                        HIP_CHECK(hipMalloc(&d_workspace, workspace_size));
+                        hipblaslt_ext::UserArguments *userArgs, *d_userArgs;
+                        HIP_CHECK(hipHostMalloc(&userArgs, nb * sizeof(hipblaslt_ext::UserArguments)));
+                        groupedgemm.getDefaultValueForDeviceUserArguments(userArgs);
+                        HIP_CHECK(hipMalloc(&d_userArgs, nb * sizeof(hipblaslt_ext::UserArguments)));
+                        HIP_CHECK(hipMemcpy(d_userArgs, userArgs,
+                                            nb * sizeof(hipblaslt_ext::UserArguments),
+                                            hipMemcpyHostToDevice));
+                        // Make sure to initialize every time when algo changes
+                        CHECK_HIPBLASLT_ERROR(
+                            groupedgemm.initialize(heuristicResult[0].algo, d_workspace));
+                        CHECK_HIPBLASLT_ERROR(groupedgemm.run(d_userArgs, stream));
+                        HIP_CHECK(hipFree(userArgs));
+                        HIP_CHECK(hipFree(d_userArgs));
+                        HIP_CHECK(hipFree(d_workspace));
+                    }
+                }
+#endif
+
+                if(!use_hipblaslt)
+                // hipBLASLt is not available, doesn't support the datatype or failed to find a solution
+                {
+                    const int min_k = 5; // launch gemms of at least size 512 = 16 << 5
+                    const int max_l = 5; // launch at most 32 = 1 << 5 gemms ?
+                    rocblas_int lvl = std::min(max_l, std::max(0, levs - std::max(k, min_k)));
+                    rocblas_int nb = 1 << lvl;
+                    std::vector<rocblas_int> ns(nb);
+                    ns[0] = n;
+                    for(int i = 0; i < lvl; ++i)
+                    {
+                        for(int j = (1 << i); j > 0; --j)
+                        {
+                            auto t = ns[j - 1];
+                            auto t2 = t / 2;
+                            ns[j * 2 - 1] = (2 * t2 < t) ? t2 + 1 : t2;
+                            ns[j * 2 - 2] = t2;
+                        }
+                    }
+                    for(rocblas_int i = 0, ps = 0; i < nb; ++i)
+                    {
+                        rocsolver_gemm(handle, rocblas_operation_none, rocblas_operation_none,
+                                       ns[i], n, ns[i], &one, V, ps * ldv + ps, ldv, strideV,
+                                       tempgemm, n * n + ps, n, 2 * n * n, &zero, tempgemm, ps, n,
+                                       2 * n * n, batch_count, workArr);
+                        ps += ns[i];
+                    }
+                }
+#endif
             }
 
             // d. update level
-            ROCSOLVER_LAUNCH_KERNEL((stedc_mergeUpdate_kernel<S>),
-                                    dim3(numgrps3, batch_count), dim3(STEDC_BDIM), 0, stream, 
-                                    levs, blks, k, n, D + shiftD, strideD,
-                                    V, 0, ldv, strideV, tmpz, tempgemm, splits);
+            ROCSOLVER_LAUNCH_KERNEL((stedc_mergeUpdate_kernel<S>), dim3(numgrps3, batch_count),
+                                    dim3(STEDC_BDIM), 0, stream, levs, blks, k, n, D + shiftD,
+                                    strideD, V, 0, ldv, strideV, tmpz, tempgemm, splits);
         }
 
         // 4. update and sort
