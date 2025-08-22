@@ -39,7 +39,6 @@
 #include "rocsolver/rocsolver.h"
 
 #include <algorithm>
-#include <unordered_map>
 
 ROCSOLVER_BEGIN_NAMESPACE
 
